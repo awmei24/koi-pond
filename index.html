@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Koi Pond</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700&text=%E9%B2%A4%E6%B1%A0&display=swap">
+<link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+<div id="pond" aria-label="Interactive koi pond. Drag to make ripples, tap to drop food." role="application">
+  <canvas id="gl"></canvas>
+  <canvas id="top"></canvas>
+</div>
+
+<div class="ui" id="ui">
+  <header class="mark">
+    <div class="kanji" lang="zh-Hans" aria-hidden="true">鲤<small>池</small></div>
+    <div>
+      <h1>Koi Pond</h1>
+      <p>October · late afternoon</p>
+    </div>
+    <button class="sound" id="sound" type="button" aria-pressed="true" title="Sound (M)">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path class="spk" d="M4 9v6h4l5 4V5L8 9z"/>
+        <path class="on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/>
+        <path class="off" d="M16 9l6 6M22 9l-6 6"/>
+      </svg>
+      <span>Sound</span>
+    </button>
+  </header>
+  <footer class="foot">
+    <p class="hint"><b>Drag</b> to move your hand through the water. <b>Tap</b> to scatter food.</p>
+    <ul class="roster" id="roster"></ul>
+  </footer>
+</div>
+
+<script src="src/main.js"></script>
+</body>
+</html>
