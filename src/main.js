@@ -33,6 +33,78 @@
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   const wrapAngle = (a) => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TAU; return a; };
   const pick = (arr, r = rand) => arr[Math.floor(r() * arr.length)];
+  const smoothstep = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+  const mix3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+  // ---------- time of day & season ----------
+  // Lighting follows the visitor's clock and calendar. Preview another time with ?hour=21.5&month=1 (month 1-12).
+  const MONTHS = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+  const WINTER = 0, SPRING = 1, SUMMER = 2, AUTUMN = 3;
+  const SEASON_OF_MONTH = [0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 0];
+  const CANOPY = [[0.75, 0.78, 0.82], [0.95, 0.72, 0.8], [0.35, 0.55, 0.3], [0.95, 0.55, 0.28]];
+  // [night, golden hour, day]
+  const AMB = [[0.3, 0.38, 0.55], [1, 0.82, 0.66], [1, 1, 1]];
+  const SUN = [[0.55, 0.65, 0.85], [1, 0.72, 0.42], [1, 0.93, 0.74]];
+  const SKY = [[0.05, 0.08, 0.16], [0.95, 0.6, 0.42], [0.42, 0.6, 0.58]];
+  const MOON_DIR = [-0.3, -0.6, 0.7];
+  const query = new URLSearchParams(location.search);
+  const forceHour = parseFloat(query.get("hour")), forceMonth = parseInt(query.get("month"), 10);
+
+  function computeLight() {
+    const now = new Date(), year = now.getFullYear();
+    const hasMonth = forceMonth >= 1 && forceMonth <= 12;
+    const month = hasMonth ? forceMonth - 1 : now.getMonth();
+    const hour = isNaN(forceHour) ? now.getHours() + now.getMinutes() / 60 : ((forceHour % 24) + 24) % 24;
+    // timezone offsets reveal DST, and DST in January means the southern hemisphere
+    const jan = new Date(year, 0, 1).getTimezoneOffset(), jul = new Date(year, 6, 1).getTimezoneOffset();
+    const south = jan < jul;
+    const dst = new Date(year, month, 15).getTimezoneOffset() < Math.max(jan, jul);
+    const seasonMonth = (month + (south ? 6 : 0)) % 12;
+    const doy = seasonMonth * 30.4 + (hasMonth ? 15 : now.getDate());
+    const yearWave = Math.sin(TAU * (doy - 80) / 365); // +1 midsummer, -1 midwinter
+    const dayLen = 12 + 2.8 * yearWave, noon = dst ? 13 : 12;
+    const x = (hour - (noon - dayLen / 2)) / dayLen; // 0 at sunrise, 1 at sunset
+    // sun height: 0 at the horizon, up to 0.5 (winter) or 1 (summer) at noon, down to -1 an hour or two after dark
+    const elev = x >= 0 && x <= 1 ? Math.sin(Math.PI * x) * (0.75 + 0.25 * yearWave)
+      : -Math.min(1, (x < 0 ? -x : x - 1) * dayLen / 2);
+    const lit = smoothstep(-0.5, 0.1, elev); // 0 at night, 1 once the sun is up
+    const high = smoothstep(0, 0.35, elev); // 0 at the horizon, 1 well up
+    const warm = lit * (1 - high); // golden hour
+    const blend = (set) => mix3(set[0], mix3(set[1], set[2], high), lit);
+
+    // sun rises on the right (east), sets on the left; shadows fall away from it
+    const xs = clamp(x, 0, 1);
+    const dir = mix3(MOON_DIR, [Math.cos(Math.PI * xs) * 0.75, -0.55, 0.25 + 0.7 * Math.max(elev, 0)], lit);
+    const z = Math.max(dir[2], 0.3);
+    let sx = -dir[0] / z * 42, sy = -dir[1] / z * 42;
+    const sl = Math.hypot(sx, sy);
+    if (sl > 100) { sx *= 100 / sl; sy *= 100 / sl; }
+
+    let when;
+    if (elev <= -0.5) when = "night";
+    else if (elev < 0.1) when = hour < noon ? "dawn" : "dusk";
+    else when = xs < 0.3 ? "morning" : xs < 0.45 ? "late morning" : xs < 0.6 ? "midday" : xs < 0.8 ? "afternoon" : "late afternoon";
+
+    // the top canvas isn't lit by the shader, so it gets a flat tint: navy at night, amber at golden hour
+    const night = 1 - lit, tintA = night * 0.7 + warm * 0.14;
+    const tint = mix3([255, 150, 70], [8, 14, 30], night / (night + warm || 1)).map(Math.round);
+    const season = SEASON_OF_MONTH[seasonMonth];
+    return {
+      season, label: `${MONTHS[month]} · ${when}`,
+      amb: blend(AMB), sun: blend(SUN), sky: blend(SKY),
+      canopy: CANOPY[season].map((c) => c * (0.15 + 0.85 * lit)),
+      dir, caus: 0.2 + 0.8 * lit - 0.45 * warm, spec: 0.5 + 0.6 * lit + 0.3 * warm,
+      shadowA: 0.38 * (0.3 + 0.7 * lit), shadowOff: [sx, sy],
+      tint: tintA > 0.01 ? `rgba(${tint.join(",")},${tintA.toFixed(3)})` : null
+    };
+  }
+  let light = computeLight();
+  const whenEl = document.getElementById("when");
+  function refreshLight() {
+    light = computeLight();
+    if (whenEl.textContent !== light.label) whenEl.textContent = light.label;
+  }
 
   // ---------- water simulation (height field, CPU) ----------
   let cell = 4, cols = 0, rows = 0, cur, prev, wdata;
@@ -118,8 +190,19 @@
     ctx.arc(0, 0, R, -85 * DEG, -30 * DEG);
     ctx.closePath();
   }
+  function petalPath(ctx, R) {
+    ctx.beginPath();
+    ctx.moveTo(0, R);
+    ctx.bezierCurveTo(R * 0.9, R * 0.6, R * 0.8, -R * 0.7, R * 0.22, -R);
+    ctx.lineTo(0, -R * 0.72); // the notch at the tip
+    ctx.lineTo(-R * 0.22, -R);
+    ctx.bezierCurveTo(-R * 0.8, -R * 0.7, -R * 0.9, R * 0.6, 0, R);
+    ctx.closePath();
+  }
   function leafPath(ctx, kind, R) {
-    if (kind === "maple") maplePath(ctx, R); else ginkgoPath(ctx, R);
+    if (kind === "maple") maplePath(ctx, R);
+    else if (kind === "petal") petalPath(ctx, R);
+    else ginkgoPath(ctx, R);
   }
 
   // ---------- pond floor (generated once per size) ----------
@@ -392,8 +475,12 @@
   let food = [];
   const scares = [];
   const MAPLE_COLS = ["#c63a22", "#d9572a", "#b4262b", "#e07b2b", "#cf4a2e"];
+  const SUMMER_COLS = ["#5f8f3a", "#6d9a40", "#4f7d34"];
+  const WINTER_COLS = ["#7a5532", "#6b4a2c", "#8a6a3e"];
+  const PETAL_COLS = ["#f6c9d4", "#f2b5c4", "#fbe0e6"];
   function makeFloaters() {
     const r = mulberry32(42);
+    const season = light.season;
     floaters = [];
     const padR = clamp(Math.min(W, H) * 0.075, 32, 74);
     const nPads = W * H > 700000 ? 6 : 4;
@@ -404,17 +491,25 @@
         kind: "pad", x: sx * W + (r() - 0.5) * 40, y: sy * H + (r() - 0.5) * 40, r: padR * (0.75 + r() * 0.45),
         vx: 0, vy: 0, rot: r() * TAU, av: 0, m: 1, seed: r() * 100,
         blemish: Array.from({ length: 2 + Math.floor(r() * 4) }, () => [r() * TAU, 0.5 + r() * 0.45, 0.08 + r() * 0.14]),
-        tone: r()
+        // tone > 0.55 is a yellowing pad: mixed in autumn, all of them in winter, none in spring/summer
+        tone: season === AUTUMN ? r() : season === WINTER ? 0.55 + r() * 0.45 : r() * 0.55
       });
     }
-    const nLeaves = W * H > 700000 ? 9 : 6;
+    const base = W * H > 700000 ? 9 : 6;
+    const nLeaves = season === SPRING ? base * 2 : season === AUTUMN ? base : Math.ceil(base / 2);
     for (let i = 0; i < nLeaves; i++) {
-      const gink = r() < 0.3;
-      floaters.push({
-        kind: gink ? "ginkgo" : "maple", x: r() * W, y: r() * H, r: (gink ? 13 : 16) + r() * 7,
-        vx: 0, vy: 0, rot: r() * TAU, av: 0, m: 0.3, seed: r() * 100,
-        col: gink ? (r() < 0.5 ? "#e4b73c" : "#d9a52c") : pick(MAPLE_COLS, r)
-      });
+      const f = { x: r() * W, y: r() * H, vx: 0, vy: 0, rot: r() * TAU, av: 0, m: 0.3, seed: r() * 100 };
+      if (season === SPRING) {
+        Object.assign(f, { kind: "petal", r: 5 + r() * 3, m: 0.2, col: pick(PETAL_COLS, r) });
+      } else {
+        const gink = season !== SUMMER && r() < 0.3;
+        f.kind = gink ? "ginkgo" : "maple";
+        f.r = (gink ? 13 : 16) + r() * 7;
+        f.col = season === SUMMER ? pick(SUMMER_COLS, r)
+          : season === WINTER ? pick(WINTER_COLS, r)
+          : gink ? (r() < 0.5 ? "#e4b73c" : "#d9a52c") : pick(MAPLE_COLS, r);
+      }
+      floaters.push(f);
     }
   }
   function drawPad(ctx, p, bob) {
@@ -454,9 +549,14 @@
     ctx.translate(f.x, f.y); ctx.rotate(f.rot);
     leafPath(ctx, f.kind, f.r);
     ctx.fillStyle = f.col; ctx.fill();
-    ctx.strokeStyle = "rgba(60,15,5,0.35)"; ctx.lineWidth = 0.8; ctx.stroke();
-    ctx.strokeStyle = f.kind === "maple" ? "rgba(90,20,10,0.4)" : "rgba(130,90,10,0.35)";
     ctx.lineWidth = 0.8;
+    if (f.kind === "petal") {
+      ctx.strokeStyle = "rgba(170,90,110,0.3)"; ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    ctx.strokeStyle = "rgba(60,15,5,0.35)"; ctx.stroke();
+    ctx.strokeStyle = f.kind === "maple" ? "rgba(90,20,10,0.4)" : "rgba(130,90,10,0.35)";
     ctx.beginPath();
     if (f.kind === "maple") {
       for (const [a, len] of MAPLE_LOBES) {
@@ -876,7 +976,7 @@
     shctx.fillStyle = "#000";
     for (const f of floaters) {
       shctx.save();
-      shctx.translate(30, 38);
+      shctx.translate(light.shadowOff[0], light.shadowOff[1]);
       if (f.kind === "pad") {
         shctx.beginPath(); shctx.arc(f.x, f.y, f.r, 0, TAU);
       } else {
@@ -887,14 +987,22 @@
       shctx.restore();
     }
     shctx.save();
-    shctx.translate(14, 18);
+    // koi swim deeper than the floaters sit, so their shadows land closer
+    shctx.translate(light.shadowOff[0] * 0.47, light.shadowOff[1] * 0.47);
     for (const k of koi) drawKoi(shctx, k, true);
     shctx.restore();
-    sctx.globalAlpha = 0.38;
+    sctx.globalAlpha = light.shadowA;
     sctx.drawImage(shadowC, 0, 0, sceneC.width, sceneC.height);
     sctx.globalAlpha = 1;
     sctx.setTransform(SS, 0, 0, SS, 0, 0);
     for (const k of koi) drawKoi(sctx, k, false);
+    if (!gl) {
+      // no shader to light the scene, so multiply the ambient color in directly
+      sctx.globalCompositeOperation = "multiply";
+      sctx.fillStyle = `rgb(${light.amb.map((c) => Math.round(c * 255)).join(",")})`;
+      sctx.fillRect(0, 0, W, H);
+      sctx.globalCompositeOperation = "source-over";
+    }
   }
   function drawOverlay() {
     tctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -910,6 +1018,12 @@
         drawPad(tctx, f, clamp(g[2] * 0.012, -0.03, 0.03));
       } else drawLeaf(tctx, f);
     }
+    if (light.tint) {
+      tctx.globalCompositeOperation = "source-atop";
+      tctx.fillStyle = light.tint;
+      tctx.fillRect(0, 0, W, H);
+      tctx.globalCompositeOperation = "source-over";
+    }
   }
 
   // ---------- WebGL composite ----------
@@ -921,7 +1035,8 @@ precision highp float;
 varying vec2 vUv;
 uniform sampler2D uScene, uWater;
 uniform vec2 uRes, uWScale, uWOff;
-uniform float uTime;
+uniform float uTime, uCaus, uSpec;
+uniform vec3 uAmb, uSun, uSky, uCanopy, uL;
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
 float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
   return mix(mix(hash(i),hash(i+vec2(1.0,0.0)),f.x),mix(hash(i+vec2(0.0,1.0)),hash(i+vec2(1.0,1.0)),f.x),f.y);}
@@ -951,23 +1066,23 @@ void main(){
   col.r=texture2D(uScene,vUv+off*1.06).r;
   col.g=texture2D(uScene,vUv+off).g;
   col.b=texture2D(uScene,vUv+off*0.94).b;
+  col*=uAmb;
   float ca=caustic((px+nn*30.0)/560.0,t*0.32);
-  vec3 sun=vec3(1.0,0.93,0.74);
-  col+=sun*(ca*0.11+clamp(focus,-0.6,1.0)*0.22)*(0.55+0.45*col);
+  col+=uSun*(ca*0.11+clamp(focus,-0.6,1.0)*0.22)*uCaus*(0.55+0.45*col);
   float d=length((vUv-0.5)*vec2(uRes.x/uRes.y,1.0));
-  vec3 deep=vec3(0.02,0.1,0.1);
+  vec3 deep=vec3(0.02,0.1,0.1)*uAmb;
   col=mix(col,deep,0.24+d*0.12);
   float dap=smoothstep(0.3,0.78,noise(px*0.0032+vec2(t*0.018,-t*0.013)));
   col*=0.76+dap*0.36;
   vec3 N=normalize(vec3(-nn*1.3,1.0));
-  vec3 L=normalize(vec3(-0.45,-0.6,0.66));
+  vec3 L=normalize(uL);
   vec3 Hh=normalize(L+vec3(0.0,0.0,1.0));
   float spec=pow(max(dot(N,Hh),0.0),110.0);
   float canopy=noise(px*0.004+vec2(-t*0.01,t*0.008));
-  vec3 sky=mix(vec3(0.42,0.6,0.58),vec3(0.95,0.55,0.28),smoothstep(0.45,0.8,canopy));
+  vec3 sky=mix(uSky,uCanopy,smoothstep(0.45,0.8,canopy));
   float slope=clamp(length(n)*0.6+0.04,0.0,0.6);
   col=mix(col,sky,slope*0.35);
-  col+=spec*vec3(1.0,0.95,0.84)*1.1;
+  col+=spec*uSun*uSpec;
   col*=1.0-smoothstep(0.5,1.2,d)*0.5;
   gl_FragColor=vec4(col,1.0);
 }`;
@@ -1001,7 +1116,8 @@ void main(){
       return t;
     };
     texScene = mk(); texWater = mk();
-    for (const n of ["uScene", "uWater", "uRes", "uWScale", "uWOff", "uTime"]) uLoc[n] = gl.getUniformLocation(prog, n);
+    for (const n of ["uScene", "uWater", "uRes", "uWScale", "uWOff", "uTime",
+      "uCaus", "uSpec", "uAmb", "uSun", "uSky", "uCanopy", "uL"]) uLoc[n] = gl.getUniformLocation(prog, n);
     gl.uniform1i(uLoc.uScene, 0); gl.uniform1i(uLoc.uWater, 1);
     return true;
   }
@@ -1019,6 +1135,13 @@ void main(){
     gl.uniform2f(uLoc.uWScale, W / (cell * cols), H / (cell * rows));
     gl.uniform2f(uLoc.uWOff, 1.5 / cols, 1.5 / rows);
     gl.uniform1f(uLoc.uTime, time);
+    gl.uniform1f(uLoc.uCaus, light.caus);
+    gl.uniform1f(uLoc.uSpec, light.spec);
+    gl.uniform3fv(uLoc.uAmb, light.amb);
+    gl.uniform3fv(uLoc.uSun, light.sun);
+    gl.uniform3fv(uLoc.uSky, light.sky);
+    gl.uniform3fv(uLoc.uCanopy, light.canopy);
+    gl.uniform3fv(uLoc.uL, light.dir);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
@@ -1083,10 +1206,11 @@ void main(){
   disturb(W * 0.3, H * 0.62, 6, -1.6);
 
   const WATER_STEP = 1 / 60, MAX_WATER_STEPS = 3;
-  let last = performance.now(), acc = 0;
+  let last = performance.now(), acc = 0, lastLight = -Infinity;
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now; time += dt;
+    if (time - lastLight >= 1) { lastLight = time; refreshLight(); }
     handlePointers();
     updateKoi(dt);
     updateFloaters(dt);
